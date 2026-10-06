@@ -1,5 +1,5 @@
-import os, re
-from flask import Flask, request, jsonify, render_template_string
+import os, re, requests
+from flask import Flask, request, jsonify, render_template_string, Response, stream_with_context
 import yt_dlp
 
 app = Flask(__name__)
@@ -38,7 +38,7 @@ HTML = """<!doctype html>
   <div class="container">
     <h1>🚀 Video Downloader</h1>
     <div class="input-group">
-      <input id="url" type="url" placeholder="วางลิงก์วิดีโอ (X/Twitter, TikTok, YouTube, ฯลฯ)" autocomplete="off">
+      <input id="url" type="url" placeholder="วางลิงก์วิดีโอ (X/Twitter, TikTok, Videy, ฯลฯ)" autocomplete="off">
       <button onclick="getInfo()">ตรวจสอบและดึงลิงก์</button>
     </div>
 
@@ -84,10 +84,12 @@ HTML = """<!doctype html>
           
           let btnsHtml = '';
           if (item.video_url) {
-            btnsHtml += `<a class="btn btn-video" href="${item.video_url}" target="_blank" download>ดาวน์โหลดวิดีโอ (MP4)</a>`;
+            const proxyVUrl = '/api/proxy?url=' + encodeURIComponent(item.video_url) + '&type=video';
+            btnsHtml += `<a class="btn btn-video" href="${proxyVUrl}" target="_blank">ดาวน์โหลดวิดีโอ (MP4)</a>`;
           }
           if (item.audio_url) {
-            btnsHtml += `<a class="btn btn-audio" href="${item.audio_url}" target="_blank" download>เฉพาะเสียง (Audio)</a>`;
+            const proxyAUrl = '/api/proxy?url=' + encodeURIComponent(item.audio_url) + '&type=audio';
+            btnsHtml += `<a class="btn btn-audio" href="${proxyAUrl}" target="_blank">เฉพาะเสียง (Audio)</a>`;
           }
 
           card.innerHTML = `${imgHtml}<div class="video-title">${titleText}</div><div class="btn-group">${btnsHtml}</div>`;
@@ -121,7 +123,7 @@ def info():
     if not is_valid_url(url):
         return jsonify(error="กรุณากรอก URL ที่ถูกต้อง"), 400
 
-    # กรณีเป็น Direct Media URL (.mp4 หรือโดเมนเก็บไฟล์ตรงอย่าง videy.co)
+    # กรณีเป็น Direct Media URL (.mp4, videy.co, twimg.jp)
     if re.search(r'\.(mp4|m3u8|mov|webm)($|\?)', url, re.I) or "videy.co" in url or "twimg.jp" in url:
         return jsonify(items=[{
             "title": "ไฟล์วิดีโอโดยตรง (Direct Video)",
@@ -141,12 +143,7 @@ def info():
             info_dict = ydl.extract_info(url, download=False)
 
         items = []
-        
-        # ตรวจสอบว่าเป็น Playlist/หลายวิดีโอในโพสต์เดียว หรือไม่
-        if "entries" in info_dict and info_dict["entries"]:
-            entries = info_dict["entries"]
-        else:
-            entries = [info_dict]
+        entries = info_dict.get("entries") if "entries" in info_dict and info_dict["entries"] else [info_dict]
 
         for entry in entries:
             if not entry:
@@ -155,7 +152,6 @@ def info():
             v_url = None
             a_url = None
 
-            # สกัดหา URL วิดีโอ/เสียง ที่สมบูรณ์ที่สุด
             formats = entry.get("formats", [])
             for f in reversed(formats):
                 f_url = f.get("url")
@@ -172,7 +168,6 @@ def info():
                 if v_url and a_url:
                     break
 
-            # Fallback หากหา format ย่อยไม่เจอ
             if not v_url:
                 v_url = entry.get("url")
 
@@ -185,8 +180,7 @@ def info():
 
         return jsonify(items=items)
 
-    except Exception as e:
-        # หาก yt-dlp ล้มเหลว ให้คืนค่าส่งกลับเป็นลิงก์ไฟล์ตรง
+    except Exception:
         return jsonify(items=[{
             "title": "ลิงก์ไฟล์ตรง (Direct Media)",
             "thumbnail": None,
@@ -195,6 +189,37 @@ def info():
         }])
 
 
+@app.get("/api/proxy")
+def proxy():
+    target_url = request.args.get("url", "")
+    mode = request.args.get("type", "video")
+
+    if not is_valid_url(target_url):
+        return "Invalid URL", 400
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Referer": target_url
+    }
+
+    try:
+        req = requests.get(target_url, headers=headers, stream=True, timeout=15)
+        ext = "mp3" if mode == "audio" else "mp4"
+        filename = f"video_download.{ext}"
+
+        def generate():
+            for chunk in req.iter_content(chunk_size=8192):
+                if chunk:
+                    yield chunk
+
+        response = Response(stream_with_context(generate()), content_type=req.headers.get("Content-Type", "application/octet-stream"))
+        response.headers["Content-Disposition"] = f'attachment; filename="{filename}"'
+        return response
+
+    except Exception as e:
+        return f"Download Error: {str(e)}", 500
+
+
 if __name__ == "__main__":
     app.run(host="127.0.0.1", port=5000, debug=False)
-  
+      
