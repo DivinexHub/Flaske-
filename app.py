@@ -32,7 +32,7 @@ async function getInfo(){
     box.innerHTML=(d.thumbnail?'<img src="'+d.thumbnail+'">':'')+'<h3></h3>'
       +'<a class="btn" href="/api/download?mode=video&url='+q+'">ดาวน์โหลดวิดีโอ (MP4)</a>'
       +'<a class="btn" href="/api/download?mode=audio&url='+q+'">เฉพาะเสียง</a>';
-    box.querySelector('h3').textContent=d.title;
+    box.querySelector('h3').textContent=d.title || 'ดาวน์โหลดวิดีโอ';
   }catch(e){box.innerHTML='<p class="err"></p>';box.querySelector('p').textContent=e.message;}
 }
 </script></body></html>"""
@@ -53,9 +53,17 @@ def info():
     if not valid(url):
         return jsonify(error="ลิงก์ไม่ถูกต้อง"), 400
     try:
-        with yt_dlp.YoutubeDL({"quiet": True, "noplaylist": True}) as y:
-            d = y.extract_info(url, download=False)
-        return jsonify(title=d.get("title"), thumbnail=d.get("thumbnail"))
+        # ลองดึงข้อมูลตามปกติก่อน หากไม่สำเร็จค่อยใช้ generic extractor
+        opts = {"quiet": True, "noplaylist": True}
+        try:
+            with yt_dlp.YoutubeDL(opts) as y:
+                d = y.extract_info(url, download=False)
+        except Exception:
+            opts["force_generic_extractor"] = True
+            with yt_dlp.YoutubeDL(opts) as y:
+                d = y.extract_info(url, download=False)
+
+        return jsonify(title=d.get("title") or "Video File", thumbnail=d.get("thumbnail"))
     except Exception as e:
         return jsonify(error="ดึงข้อมูลไม่ได้: " + str(e)[:200]), 400
 
@@ -66,12 +74,25 @@ def download():
     if not valid(url):
         return "invalid url", 400
     tmp = tempfile.mkdtemp()
-    fmt = "bestaudio[ext=m4a]/bestaudio" if mode == "audio" else "best[ext=mp4]/best"
-    opts = {"quiet": True, "noplaylist": True, "format": fmt,
-            "outtmpl": os.path.join(tmp, "%(title).80s.%(ext)s")}
+    fmt = "bestaudio/best" if mode == "audio" else "best"
+    
+    opts = {
+        "quiet": True, 
+        "noplaylist": True, 
+        "format": fmt,
+        "outtmpl": os.path.join(tmp, "%(title).80s.%(ext)s")
+    }
+    
     try:
-        with yt_dlp.YoutubeDL(opts) as y:
-            y.extract_info(url, download=True)
+        try:
+            with yt_dlp.YoutubeDL(opts) as y:
+                y.extract_info(url, download=True)
+        except Exception:
+            # หากดาวน์โหลดแบบปกติไม่ผ่าน ให้สลับไปใช้ generic extractor สำหรับลิงก์ตรง
+            opts["force_generic_extractor"] = True
+            with yt_dlp.YoutubeDL(opts) as y:
+                y.extract_info(url, download=True)
+
         path = os.path.join(tmp, os.listdir(tmp)[0])
     except Exception as e:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -87,3 +108,4 @@ def download():
 
 if __name__ == "__main__":
     app.run(host="127.0.0.1", port=5000, debug=False)
+  
